@@ -1,4 +1,3 @@
-/devices/UD12/Channel 1
-/devices/UD12/Channel 2
-/devices/UD12/Channel 3
-/devices/UD12/Channel 4
+# Описание
+
+Данный проект используется для работы с RGBW лентой подключенной к Razumdom DDL84R-P (через Wiren Board) в Home Assistant.
