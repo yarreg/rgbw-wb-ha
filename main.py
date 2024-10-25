@@ -2,161 +2,230 @@
 
 import logging
 import json
-from os import environ
+from typing import Callable
 
 import paho.mqtt.client as mqtt
 
+import config
 
-class RazumdomRGBW:
-    def __init__(self, client, name, r_ch=1, g_ch=2, b_ch=3, w_ch=4) -> None:
+
+class Device:
+    def __init__(self, client: mqtt.Client, name: str) -> None:
         self.client = client
         self.name = name
-        self.channels = {"R": r_ch, "G": g_ch, "B": b_ch, "W": w_ch}
+        self._update_callbacks: list[Callable] = []
 
-        self.update_callbacks = []
+    def add_update_callback(self, callback: Callable) -> None:
+        """Add a callback to be executed when the device state updates."""
+        self._update_callbacks.append(callback)
 
-        self.state = {
-            "k_values": {"K1": 0, "K2": 0, "K3": 0, "K4": 0},
-            "channel_values": {"Channel 1": 0, "Channel 2": 0, "Channel 3": 0, "Channel 4": 0},
-        }
+    def remove_update_callback(self, callback: Callable) -> None:
+        """Remove a previously added update callback."""
+        self._update_callbacks.remove(callback)
 
-        for i in range(1, 5):
-            self.client.message_callback_add(f"/devices/{self.name}/controls/Channel {i}", self._on_mqtt_message)
-            self.client.message_callback_add(f"/devices/{self.name}/controls/K{i}", self._on_mqtt_message)
-
-    def execute_callbacks(self):
-        for fn in self.update_callbacks:
+    def _execute_callbacks(self) -> None:
+        """Execute all registered update callbacks."""
+        for fn in self._update_callbacks:
             fn(self)
 
-    def _on_mqtt_message(self, client, userdata, msg):
-        topic = msg.topic
-        payload = msg.payload.decode("utf-8")
-        logging.info(f"Received message: {topic} - {payload}")
-
-        last_topic = topic.split("/")[-1]
-        if last_topic in ("K1", "K2", "K3", "K4"):
-            self.state["k_values"][last_topic] = int(payload)
-            self.execute_callbacks()
-        elif last_topic in ("Channel 1", "Channel 2", "Channel 3", "Channel 4"):
-            self.state["channel_values"][last_topic] = int(payload)
-            self.execute_callbacks()
-        else:
-            logging.error(f"Unknown topic: {topic}")
-
-    def set_rgbw(self, rgbw):
-        for i, key in enumerate(["R", "G", "B", "W"]):
-            ch = self.channels[key]
-            value = round(rgbw[i] * 1000 / 255)
-            self.client.publish(f"/devices/{self.name}/controls/Channel {ch}/on", value)
-
-    def set_state(self, state):
-        state = str(int(state))
-        for i in range(1, 5):
-            self.client.publish(f"/devices/{self.name}/controls/K{i}/on", state)
-
-    def get_brightness(self):
-        return round(sum(self.get_rgbw()) / 4)
-
-    def set_brightness(self, brightness):
-        rgbw = [brightness] * 4
-        self.set_rgbw(rgbw)
-
-    def get_state(self):
-        return all(self.state["k_values"].values())
-
-    def get_rgbw(self):
-        rgbw_values = [0] * 4
-        for i, key in enumerate(["R", "G", "B", "W"]):
-            ch = self.channels[key]
-            rgbw_values[i] = round(self.state["channel_values"][f"Channel {ch}"] * 255 / 1000)
-
-        return rgbw_values
-
-
-class App:
-    def __init__(self, mqtt_host, mqtt_port) -> None:
-        self.mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-
-        logging.info(f"Connecting to {mqtt_host}:{mqtt_port}")
-        self.mqttc.connect(mqtt_host, mqtt_port, keepalive=60)
-        self.mqttc.on_disconnect = self.on_mqtt_disconnect
-        self.mqttc.on_connect = self.on_mqtt_connect
-
-        self.mqttc.subscribe("/devices/UD12/#")
-        self.razumdom_rgbw_ud12 = RazumdomRGBW(self.mqttc, "UD12", 2, 4, 1, 3)
-        self.razumdom_rgbw_ud12.update_callbacks.append(self.on_razumdom_update)
-        self.mqttc.message_callback_add("/devices/UD12/rgbw/set", self.on_set_rgbw)
-
-    def on_razumdom_update(self, razumdom_rgbw):
-        message = {
-            "state": "ON" if razumdom_rgbw.get_state() else "OFF",
-            "color": {k: v for k, v in zip(["r", "g", "b", "w"], razumdom_rgbw.get_rgbw())},
-            "color_mode": "rgbw",
-            "brightness": razumdom_rgbw.get_brightness(),
-        }
-        logging.info(message)
-        self.mqttc.publish("/devices/UD12/rgbw", json.dumps(message))
-
-    def on_set_rgbw(self, client, userdata, msg):
-        topic = msg.topic
-        payload = json.loads(msg.payload.decode("utf-8"))
-        logging.info(f"Received message: {topic} - {payload}")
-
-        """
-        Response example:
-        {
-            "state": "ON",
-            "color": {
-                "r": 255,
-                "g": 255,
-                "b": 255,
-                "w": 255
-            },
-            "color_mode": "rgbw",
-            "brightness": 100
-        }
-        """
-
-        if payload["state"] == "OFF":
-            self.razumdom_rgbw_ud12.set_state(False)
-            return
-
-        if payload["state"] == "ON" and not self.razumdom_rgbw_ud12.get_state():
-            self.razumdom_rgbw_ud12.set_state(True)
-
-        color = payload.get("color")
-        brightness = payload.get("brightness")
-
-        if brightness and not color:
-            self.razumdom_rgbw_ud12.set_brightness(brightness)
-            return
-
-        if color:
-            self.razumdom_rgbw_ud12.set_rgbw([color["r"], color["g"], color["b"], color["w"]])
-            return
-
-    def on_mqtt_message(self, client, userdata, msg):
+    def process_message(self, topic: str, payload: str) -> None:
+        """Process incoming MQTT message."""
         pass
 
-    def on_mqtt_disconnect(self, client, userdata, rc):
-        logging.info(f"Disconnected with result code {rc}")
 
-    def on_mqtt_connect(self, client, userdata, flags, reason_code, properties):
-        logging.info(f"Connected with result code {reason_code}")
+class RazumdomRGBW(Device):
+    """Represents a Razumdom RGBW device controlled via MQTT."""
 
-    def run(self):
-        self.mqttc.loop_forever()
+    def __init__(self, client: mqtt.Client, name: str, channels: dict[str, int], **kwargs) -> None:
+        super().__init__(client, name)
+        self.channels = channels  # Custom channel mappings
+
+        self.state = {
+            "k_values": {f"K{i}": 0 for i in range(1, 5)},
+            "channel_values": {f"Channel {i}": 0 for i in range(1, 5)},
+        }
+
+        # Subscribe to device-specific topics
+        for i in range(1, 5):
+            self.client.message_callback_add(
+                f"/devices/{self.name}/controls/Channel {i}",
+                lambda c, u, m: self.process_message(m.topic, m.payload.decode("utf-8")),
+            )
+            self.client.message_callback_add(
+                f"/devices/{self.name}/controls/K{i}",
+                lambda c, u, m: self.process_message(m.topic, m.payload.decode("utf-8")),
+            )
+
+    def process_message(self, topic: str, payload: str) -> None:
+        """Handle incoming MQTT messages."""
+        try:
+            logging.debug(f"Received message: {topic} - {payload}")
+
+            last_topic = topic.split("/")[-1]
+            if last_topic.startswith("K"):
+                self.state["k_values"][last_topic] = int(payload)
+            elif last_topic.startswith("Channel"):
+                self.state["channel_values"][last_topic] = int(payload)
+            else:
+                logging.warning(f"Unknown topic: {topic}")
+                return
+
+            self._execute_callbacks()
+        except Exception as e:
+            logging.exception(f"Error processing message {topic}: {e}")
+
+    @property
+    def is_on(self) -> bool:
+        """Check if the device is turned on."""
+        return all(value > 0 for value in self.state["k_values"].values())
+
+    @is_on.setter
+    def is_on(self, value: bool) -> None:
+        """Turn the device on or off."""
+        state_str = str(int(value))
+        for i in range(1, 5):
+            self.client.publish(f"/devices/{self.name}/controls/K{i}/on", state_str)
+
+    @property
+    def rgbw(self) -> list[int]:
+        """Get the current RGBW values."""
+        rgbw_values = []
+        for color in ["R", "G", "B", "W"]:
+            channel_num = self.channels.get(color)
+            channel_value = self.state["channel_values"].get(f"Channel {channel_num}", 0)
+            rgbw_values.append(round(channel_value * 255 / 1000))
+        return rgbw_values
+
+    @rgbw.setter
+    def rgbw(self, values: list[int]) -> None:
+        """Set the RGBW values."""
+        for i, color in enumerate(["R", "G", "B", "W"]):
+            channel_num = self.channels.get(color)
+            value = round(values[i] * 1000 / 255)
+            self.client.publish(f"/devices/{self.name}/controls/Channel {channel_num}/on", value)
+
+    @property
+    def brightness(self) -> int:
+        """Get the brightness level."""
+        return round(sum(self.rgbw) / 4)
+
+    @brightness.setter
+    def brightness(self, value: int) -> None:
+        """Set the brightness level."""
+        self.rgbw = [value] * 4
+
+
+class DeviceManager:
+    """Main application class."""
+
+    def __init__(self, mqtt_host: str, mqtt_port: int) -> None:
+        # Configure MQTT client
+        self._mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self._mqttc.on_connect = self._on_mqtt_connect
+        self._mqttc.on_disconnect = self._on_mqtt_disconnect
+        self._mqttc.connect(mqtt_host, mqtt_port, keepalive=60)
+
+        # Initialize devices
+        self._devices: dict[str, Device] = {}
+
+    def _on_mqtt_connect(self, client, userdata, flags, reason_code, properties) -> None:
+        """Handle MQTT connection event."""
+        logging.info("Connected to MQTT broker")
+        for device in self._devices.values():
+            self._mqttc.subscribe(f"/devices/{device.name}/#")
+
+    def _on_mqtt_disconnect(self, client, userdata, flags, reason_code, properties) -> None:
+        """Handle MQTT disconnection event."""
+        logging.warning(f"Disconnected from MQTT broker with code: {reason_code}")
+
+    def add_device(self, device_config: dict) -> None:
+        """Add a new device based on configuration."""
+        try:
+            device_type = device_config["type"]
+            name = device_config["name"]
+            channels = device_config.get("channels", {})
+
+            if device_type == "RazumdomRGBW":
+                device = RazumdomRGBW(self._mqttc, name, channels)
+                device.add_update_callback(self._on_device_update)
+                self._devices[name] = device
+
+                # Subscribe to set commands
+                self._mqttc.message_callback_add(
+                    f"/devices/{name}/rgbw/set", lambda c, u, m: self._handle_set_command(name, m)
+                )
+            else:
+                logging.error(f"Unknown device type: {device_type}")
+        except KeyError as e:
+            logging.error(f"Missing required configuration key: {e}")
+        except Exception as e:
+            logging.exception(f"Error adding device: {e}")
+
+    def _handle_set_command(self, device_name: str, message: mqtt.MQTTMessage) -> None:
+        """Handle incoming set commands."""
+        try:
+            payload = json.loads(message.payload.decode("utf-8"))
+            device = self._devices.get(device_name)
+            if not device or not isinstance(device, RazumdomRGBW):
+                return
+
+            state = payload.get("state")
+            if state == "OFF":
+                device.is_on = False
+                return
+
+            if state == "ON" and not device.is_on:
+                device.is_on = True
+
+            color = payload.get("color")
+            brightness = payload.get("brightness")
+
+            if brightness is not None and color is None:
+                device.brightness = brightness
+                return
+
+            if color:
+                rgbw_values = [color.get(k, 0) for k in ["r", "g", "b", "w"]]
+                device.rgbw = rgbw_values
+
+        except json.JSONDecodeError:
+            logging.error(f"Invalid JSON payload: {message.payload}")
+        except Exception as e:
+            logging.exception(f"Error handling set command: {e}")
+
+    def _on_device_update(self, device: Device) -> None:
+        """Handle device updates."""
+        if isinstance(device, RazumdomRGBW):
+            message = {
+                "state": "ON" if device.is_on else "OFF",
+                "color": dict(zip(["r", "g", "b", "w"], device.rgbw)),
+                "color_mode": "rgbw",
+                "brightness": device.brightness,
+            }
+            logging.debug(f"Publishing state for device {device.name}: {message}")
+            self._mqttc.publish(f"/devices/{device.name}/rgbw", json.dumps(message))
+        else:
+            raise NotImplementedError(f"Update handler for {type(device)} is not implemented")
+
+    def run(self) -> None:
+        """Start the MQTT client loop."""
+        try:
+            self._mqttc.loop_forever()
+        except KeyboardInterrupt:
+            logging.info("Application stopped by user")
+            self._mqttc.disconnect()
+        except Exception as e:
+            logging.exception(f"An unexpected error occurred: {e}")
+            self._mqttc.disconnect()
 
 
 def main():
-    log_level = environ.get("LOG_LEVEL", "INFO")
-    logging.basicConfig(level=log_level)
+    logging.basicConfig(level=config.LOG_LEVEL)
 
-    host = environ.get("MQTT_HOST")
-    port = int(environ.get("MQTT_PORT", 1883))
-
-    app = App(host, port)
-    app.run()
+    manager = DeviceManager(config.MQTT_HOST, config.MQTT_PORT)
+    for device_config in config.DEVICE_CONFIGS:
+        manager.add_device(device_config)
+    manager.run()
 
 
 if __name__ == "__main__":
