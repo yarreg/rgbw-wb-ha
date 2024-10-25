@@ -1,109 +1,167 @@
 import logging
+import json
 from os import environ
 
 import paho.mqtt.client as mqtt
 
 
-# The callback for when the client receives a CONNACK response from the server.
-def on_connect(client, userdata, flags, reason_code, properties):
-    logging.info(f"Connected with result code {reason_code}")
-    
-    topics = [
-        ('/devices/UD12/controls/K1', 0),
-        ('/devices/UD12/controls/K2', 0),
-        ('/devices/UD12/controls/K3', 0),
-        ('/devices/UD12/controls/K4', 0),
-        ('/devices/UD12/controls/Channel 1', 0),
-        ('/devices/UD12/controls/Channel 2', 0),
-        ('/devices/UD12/controls/Channel 3', 0),
-        ('/devices/UD12/controls/Channel 4', 0),
-        ('/devices/rgbw/UD12/state/set', 0),
-        ('/devices/rgbw/UD12/rgbw/set', 0)
-    ]
-    client.subscribe(topics)
-
-#       1 2 3 4
-# MAP = w r b g
-#       R G B W
-
-CHANNEL_MAP = {
-    'Channel 1': 3,
-    'Channel 2': 0,
-    'Channel 3': 2,
-    'Channel 4': 1
-}
-
-# The callback for when a PUBLISH message is received from the server.
-def on_message(client, userdata, msg):
-    topic = msg.topic
-    payload = msg.payload.decode('utf-8')
-    logging.info(f"Received message on {topic}: {payload}")
-    
-    if topic in ['/devices/UD12/controls/K1', '/devices/UD12/controls/K2', '/devices/UD12/controls/K3', '/devices/UD12/controls/K4']:
-        k_key = topic.split('/')[-1]
-        userdata["k_values"][k_key] = int(payload)
-        state = "on" if all(userdata["k_values"].values()) else "off"
-        client.publish('/devices/rgbw/UD12/state', state)
+class RazumdomRGBW:
+    def __init__(self, client, name, r_ch=1, g_ch=2, b_ch=3, w_ch=4) -> None:
+        self.client = client
+        self.name = name
+        self.channels = {
+            'R': r_ch,
+            'G': g_ch,
+            'B': b_ch,
+            'W': w_ch
+        }
         
-    elif topic in ['/devices/UD12/controls/Channel 1', '/devices/UD12/controls/Channel 2', '/devices/UD12/controls/Channel 3', '/devices/UD12/controls/Channel 4']:
-        channel_key = topic.split('/')[-1]
-        userdata["channel_values"][channel_key] = int(payload)
-       
+        self.update_callbacks = []
+        
+        self.state = {
+            'k_values': {'K1': 0, 'K2': 0, 'K3': 0, 'K4': 0},
+            'channel_values': {'Channel 1': 0, 'Channel 2': 0, 'Channel 3': 0, 'Channel 4': 0}
+        }
+        
+        for i in range(1, 5):
+            self.client.message_callback_add(f'/devices/{self.name}/controls/Channel {i}', self._on_mqtt_message)
+            self.client.message_callback_add(f'/devices/{self.name}/controls/K{i}', self._on_mqtt_message)
+        
+    def execute_callbacks(self):
+        for fn in self.update_callbacks:
+            fn(self)
+        
+    def _on_mqtt_message(self, client, userdata, msg):
+        topic = msg.topic
+        payload = msg.payload.decode('utf-8')
+        logging.info(f"Received message: {topic} - {payload}")
+
+        last_topic = topic.split('/')[-1]
+        if last_topic in ('K1', 'K2', 'K3', 'K4'):
+            self.state["k_values"][last_topic] = int(payload)
+            self.execute_callbacks()
+        elif last_topic in ('Channel 1', 'Channel 2', 'Channel 3', 'Channel 4'):
+            self.state["channel_values"][last_topic] = int(payload)
+            self.execute_callbacks()
+        else:
+            logging.error(f"Unknown topic: {topic}")
+      
+    def set_rgbw(self, rgbw):
+        for i, key in enumerate(["R", "G", "B", "W"]):
+            ch = self.channels[key]
+            value = round(rgbw[i] * 1000 / 255)
+            self.client.publish(f'/devices/{self.name}/controls/Channel {ch}/on', value)
+        
+    def set_state(self, state):
+        state = str(int(state))
+        for i in range(1, 5):
+            self.client.publish(f'/devices/{self.name}/controls/K{i}/on', state)
+            
+    def get_brightness(self):
+        return round(sum(self.get_rgbw()) / 4)
+    
+    def set_brightness(self, brightness):
+        rgbw = [brightness] * 4
+        self.set_rgbw(rgbw)
+            
+    def get_state(self):
+        return all(self.state['k_values'].values())
+    
+    def get_rgbw(self):
         rgbw_values = [0] * 4
-        for ch, index in CHANNEL_MAP.items():
-            rgbw_values[index] = str((userdata["channel_values"][ch] * 255) // 1000)
+        for i, key in enumerate(["R", "G", "B", "W"]):
+            ch = self.channels[key]
+            rgbw_values[i] = round(self.state['channel_values'][f'Channel {ch}'] * 255 / 1000)
+            
+        return rgbw_values
+
+
+class App:
+    def __init__(self, mqtt_host, mqtt_port) -> None:
+        self.mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, userdata=None)
         
-        client.publish('/devices/rgbw/UD12/rgbw', ",".join(rgbw_values))
+        logging.info(f"Connecting to {mqtt_host}:{mqtt_port}")
+        self.mqttc.connect(mqtt_host, mqtt_port, keepalive=60)
+        self.mqttc.on_disconnect = self.on_mqtt_disconnect
+        self.mqttc.on_connect = self.on_mqtt_connect
+        #self.mqttc.on_message = self.on_mqtt_message
         
-    elif topic == '/devices/rgbw/UD12/state/set':
-        payload = "1" if payload == "on" else "0"
-        if payload == userdata["state"]:
+        self.mqttc.subscribe("/devices/UD12/#")
+        self.razumdom_rgbw_ud12 = RazumdomRGBW(self.mqttc , 'UD12', 2, 4, 1, 3)
+        self.razumdom_rgbw_ud12.update_callbacks.append(self.on_razumdom_update)
+        self.mqttc.message_callback_add("/devices/UD12/rgbw/set", self.on_set_rgbw)
+        
+    def on_razumdom_update(self, razumdom_rgbw):
+        message = {
+            "state": "ON" if razumdom_rgbw.get_state() else "OFF",
+            "color": {k: v for k, v in zip(["r", "g", "b", "w"], razumdom_rgbw.get_rgbw())},
+            "color_mode": "rgbw",
+            "brightness": razumdom_rgbw.get_brightness(),
+        }
+        logging.info(message)
+        self.mqttc.publish('/devices/UD12/rgbw', json.dumps(message))
+        
+    def on_set_rgbw(self, client, userdata, msg):
+        topic = msg.topic
+        payload = json.loads(msg.payload.decode('utf-8'))
+        logging.info(f"Received message: {topic} - {payload}")
+        
+        """
+        Response example:
+        {
+            "state": "ON",
+            "color": {
+                "r": 255,
+                "g": 255,
+                "b": 255,
+                "w": 255
+            },
+            "color_mode": "rgbw",
+            "brightness": 100
+        }
+        """
+        
+        if payload["state"] == "OFF":
+            self.razumdom_rgbw_ud12.set_state(False)
             return
         
-        userdata["state"] = payload
-        client.publish('/devices/UD12/controls/K1/on', payload)
-        client.publish('/devices/UD12/controls/K2/on', payload)
-        client.publish('/devices/UD12/controls/K3/on', payload)
-        client.publish('/devices/UD12/controls/K4/on', payload)
+        if payload["state"] == "ON" and not self.razumdom_rgbw_ud12.get_state():
+            self.razumdom_rgbw_ud12.set_state(True)
 
-    elif topic == '/devices/rgbw/UD12/rgbw/set':
-        # scale 255 to 1000
-        rgbw_values = [(int(v) * 1000) // 255  for v in payload.split(',')]
-    
-        for i, value in enumerate(rgbw_values, 1):
-            value = rgbw_values[CHANNEL_MAP[f'Channel {i}']]
-            client.publish(f'/devices/UD12/controls/Channel {i}/on', value)
+        color = payload.get('color')
+        brightness = payload.get('brightness')
+        
+        if brightness and not color:
+            self.razumdom_rgbw_ud12.set_brightness(brightness)
+            return
+        
+        if color:
+            self.razumdom_rgbw_ud12.set_rgbw([color["r"], color["g"], color["b"], color["w"]])
+            return
+        
+    def on_mqtt_message(self, client, userdata, msg):
+      pass
 
+    def on_mqtt_disconnect(self, client, userdata, rc):
+        logging.info(f"Disconnected with result code {rc}")
+        
+    def on_mqtt_connect(self, client, userdata, flags, reason_code, properties):
+        logging.info(f"Connected with result code {reason_code}")
 
-def on_disconnect(client, userdata, rc):
-    logging.info(f"Disconnected with result code {rc}")
+    def run(self):
+        self.mqttc.loop_forever()
 
 
 def main():
     log_level = environ.get("LOG_LEVEL", "INFO")
     logging.basicConfig(level=log_level)
     
-    userdata = {
-        'state': None,
-        'k_values': {'K1': 0, 'K2': 0, 'K3': 0, 'K4': 0},
-        'channel_values': {'Channel 1': 0, 'Channel 2': 0, 'Channel 3': 0, 'Channel 4': 0}
-    }
-    
-    mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, userdata=userdata)
-    mqttc.on_connect = on_connect
-    mqttc.on_message = on_message
-    mqttc.on_disconnect = on_disconnect
 
     host = environ.get("MQTT_HOST")
     port = int(environ.get("MQTT_PORT", 1883))
-    logging.info(f"Connecting to {host}:{port}")
-    mqttc.connect(host, port, keepalive=60)
 
-    topic = environ.get("MQTT_TOPIC", "/devices/rgbw/ud12")
-    mqttc.subscribe(topic)
-
-    mqttc.loop_forever()
-
+    app = App(host, port)
+    app.run()
 
 if __name__ == '__main__':
     main()
