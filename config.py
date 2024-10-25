@@ -17,7 +17,7 @@ DEVICE_CONFIGS = [
         }
     },
     {
-        "name": "UD13",
+        "name": "UD11",
         "type": "RazumdomRGBW",
         "channels": {
             "R": 1,
