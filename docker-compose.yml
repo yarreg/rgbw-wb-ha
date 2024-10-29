@@ -1,0 +1,10 @@
+services:
+  rgbw-wb-ha:
+    build: .
+    image: rgbw-wb-ha
+    container_name: rgbw-wb-ha
+    restart: unless-stopped
+    environment:
+      - MQTT_HOST
+      - MQTT_PORT
+      - LOG_LEVEL
