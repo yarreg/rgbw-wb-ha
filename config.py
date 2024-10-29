@@ -20,10 +20,10 @@ DEVICE_CONFIGS = [
         "name": "UD11",
         "type": "RazumdomRGBW",
         "channels": {
-            "R": 1,
-            "G": 2,
-            "B": 3,
-            "W": 4,
+            "R": 2,
+            "G": 4,
+            "B": 1,
+            "W": 3,
         }
     },
 ]
